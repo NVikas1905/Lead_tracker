@@ -223,8 +223,8 @@ export async function callBrowserAssistant(
         const courseMentionedInCmd = courses.some(c => {
           const cName = c.name.toLowerCase();
           if (lowerCmd.includes(cName)) return true;
-          const tokens = cName.split(/\s+/).filter(w => w.length >= 3);
-          return tokens.length > 0 && tokens.some(t => lowerCmd.includes(t));
+          const tokens = cName.split(/\s+/).filter((w: string) => w.length >= 3);
+          return tokens.length > 0 && tokens.some((t: string) => lowerCmd.includes(t));
         });
 
         if (!courseMentionedInCmd) {
@@ -236,8 +236,8 @@ export async function callBrowserAssistant(
           const matchedCourse = courses.find(
             c => c.name.toLowerCase() === args.course_name?.toLowerCase() || lowerCmd.includes(c.name.toLowerCase())
           ) || courses.find(c => {
-            const tokens = c.name.toLowerCase().split(/\s+/).filter(w => w.length >= 3);
-            return tokens.some(t => lowerCmd.includes(t));
+            const tokens = c.name.toLowerCase().split(/\s+/).filter((w: string) => w.length >= 3);
+            return tokens.some((t: string) => lowerCmd.includes(t));
           });
 
           if (!matchedCourse) {

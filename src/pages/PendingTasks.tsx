@@ -284,7 +284,7 @@ export const PendingTasks: React.FC<PendingTasksProps> = ({
         style={{ 
           padding: '16px', 
           display: 'flex', 
-          justify: 'space-between', 
+          justifyContent: 'space-between', 
           alignItems: 'center', 
           flexWrap: 'wrap',
           gap: '12px' 

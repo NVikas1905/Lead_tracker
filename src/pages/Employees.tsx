@@ -381,7 +381,7 @@ const Employees: React.FC<EmployeesProps> = ({ isDemo }) => {
                 <input
                   type="number"
                   className="form-input"
-                  style={{ width: '100%', MozAppearance: 'auto', WebkitAppearance: 'auto', appearance: 'auto' } as React.CSSProperties}
+                  style={{ width: '100%' }}
                   placeholder="e.g. 28"
                   value={age}
                   min={1}
