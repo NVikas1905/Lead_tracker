@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Clock, BookOpen, Calendar, Edit2, Trash2, X, Check, Mic } from 'lucide-react';
+import { Send, Clock, BookOpen, Calendar, Edit2, Trash2, X, Check, Mic, ChevronDown, CheckCircle2, ListTodo } from 'lucide-react';
 import { isSupabaseConfigured, supabase } from '../lib/supabaseClient';
 import { getLocalNotes, saveLocalNote, updateLocalNote, deleteLocalNote, type Note } from '../lib/localDatabase';
 
@@ -11,6 +11,10 @@ const Notes: React.FC = () => {
   const [isListening, setIsListening] = useState(false);
   const [shouldAutoSave, setShouldAutoSave] = useState(false);
   const recognitionRef = useRef<any>(null);
+
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
 
   useEffect(() => {
     if (shouldAutoSave) {
@@ -77,6 +81,61 @@ const Notes: React.FC = () => {
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState('');
   const [editReminderDate, setEditReminderDate] = useState('');
+
+  // Action Items dropdown state
+  const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('.action-item-dropdown-container')) {
+        setOpenDropdownId(null);
+      }
+    };
+
+    if (openDropdownId) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [openDropdownId]);
+
+  const handleActionItemChange = async (note: Note, newStatus: 'Pending' | 'Completed') => {
+    const isCompleted = newStatus === 'Completed';
+    const updates = {
+      is_completed: isCompleted,
+      action_item: newStatus
+    };
+
+    setNotes(prev => prev.map(n => n.id === note.id ? { ...n, ...updates } : n));
+    setOpenDropdownId(null);
+
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        const { error } = await supabase
+          .from('notes')
+          .update({ is_completed: isCompleted, action_item: newStatus })
+          .eq('id', note.id);
+        
+        if (error) {
+          if (error.message?.includes('action_item') || error.code === 'PGRST204') {
+            await supabase
+              .from('notes')
+              .update({ is_completed: isCompleted })
+              .eq('id', note.id);
+          }
+          updateLocalNote(note.id, updates);
+        } else {
+          updateLocalNote(note.id, updates);
+        }
+      } catch (err) {
+        updateLocalNote(note.id, updates);
+      }
+    } else {
+      updateLocalNote(note.id, updates);
+    }
+  };
 
   useEffect(() => {
     fetchNotes();
@@ -220,6 +279,9 @@ const Notes: React.FC = () => {
       setNotes(notes.filter(n => n.id !== id));
     }
   };
+
+  const totalPages = Math.ceil(notes.length / rowsPerPage) || 1;
+  const paginatedNotes = notes.slice((currentPage - 1) * rowsPerPage, currentPage * rowsPerPage);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', animation: 'fade-in 0.4s ease-out' }}>
@@ -398,18 +460,20 @@ const Notes: React.FC = () => {
               </div>
             </div>
           ) : (
-            <div className="table-wrapper">
+            <>
+            <div className="table-wrapper" style={{ overflow: 'visible', minHeight: '160px' }}>
               <table className="admin-table">
                 <thead>
                   <tr>
-                    <th style={{ width: '180px' }}>Created At</th>
-                    <th style={{ width: '150px' }}>Reminder</th>
-                    <th>Note Content</th>
-                    <th style={{ width: '100px', textAlign: 'right' }}>Actions</th>
+                    <th style={{ width: '160px' }}>Created At</th>
+                    <th style={{ width: '130px' }}>Reminder</th>
+                    <th style={{ width: '320px' }}>Note Content</th>
+                    <th style={{ width: '140px' }}>Action Item</th>
+                    <th style={{ textAlign: 'right' }}>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {notes.map((note) => (
+                  {paginatedNotes.map((note) => (
                     <tr key={note.id} style={{ transition: 'background-color 0.2s ease' }}>
                       <td style={{ 
                         color: 'hsl(var(--muted-foreground))',
@@ -435,13 +499,18 @@ const Notes: React.FC = () => {
                               style={{ padding: '6px', fontSize: '12px', width: '120px' }}
                             />
                           </td>
-                          <td style={{ verticalAlign: 'top' }}>
+                          <td style={{ verticalAlign: 'top', maxWidth: '320px' }}>
                             <textarea
                               value={editContent}
                               onChange={(e) => setEditContent(e.target.value)}
                               className="form-textarea"
-                              style={{ minHeight: '80px', padding: '10px', fontSize: '13px' }}
+                              style={{ minHeight: '80px', padding: '10px', fontSize: '13px', width: '100%' }}
                             />
+                          </td>
+                          <td style={{ verticalAlign: 'top', width: '140px' }}>
+                            <span style={{ fontSize: '12px', color: 'hsl(var(--muted-foreground))' }}>
+                              {note.action_item || (note.is_completed ? 'Completed' : 'Pending')}
+                            </span>
                           </td>
                           <td style={{ verticalAlign: 'top', textAlign: 'right' }}>
                             <div style={{ display: 'flex', gap: '6px', justifyItems: 'flex-end', justifyContent: 'flex-end' }}>
@@ -486,14 +555,167 @@ const Notes: React.FC = () => {
                               <span style={{ color: 'hsl(var(--muted))', fontSize: '13px' }}>-</span>
                             )}
                           </td>
+
+                          {/* Note Content */}
                           <td style={{ 
                             whiteSpace: 'pre-wrap',
                             verticalAlign: 'top',
                             color: 'hsl(var(--foreground))',
-                            lineHeight: '1.6'
+                            lineHeight: '1.6',
+                            maxWidth: '320px'
                           }}>
                             {note.content}
                           </td>
+
+                          {/* Action Item Column next to Note Content */}
+                          <td style={{ verticalAlign: 'top', width: '140px' }}>
+                            {(() => {
+                              const currentStatus = note.action_item || (note.is_completed ? 'Completed' : null);
+                              const isOpen = openDropdownId === note.id;
+
+                              return (
+                                <div className="action-item-dropdown-container" style={{ position: 'relative', display: 'inline-block' }}>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setOpenDropdownId(isOpen ? null : note.id);
+                                    }}
+                                    className="btn"
+                                    style={{
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: '6px',
+                                      padding: '5px 12px',
+                                      borderRadius: '20px',
+                                      fontSize: '12px',
+                                      fontWeight: 600,
+                                      cursor: 'pointer',
+                                      border: '1px solid',
+                                      transition: 'all 0.15s ease',
+                                      outline: 'none',
+                                      whiteSpace: 'nowrap',
+                                      ...(currentStatus === 'Completed'
+                                        ? {
+                                            backgroundColor: 'hsl(var(--success) / 0.14)',
+                                            borderColor: 'hsl(var(--success) / 0.35)',
+                                            color: 'hsl(var(--success))'
+                                          }
+                                        : currentStatus === 'Pending'
+                                        ? {
+                                            backgroundColor: 'hsl(var(--warning) / 0.15)',
+                                            borderColor: 'hsl(var(--warning) / 0.35)',
+                                            color: '#d97706'
+                                          }
+                                        : {
+                                            backgroundColor: 'hsl(var(--primary) / 0.1)',
+                                            borderColor: 'hsl(var(--primary) / 0.25)',
+                                            color: 'hsl(var(--primary))'
+                                          })
+                                    }}
+                                  >
+                                    {currentStatus === 'Completed' ? (
+                                      <CheckCircle2 size={13} />
+                                    ) : currentStatus === 'Pending' ? (
+                                      <Clock size={13} />
+                                    ) : (
+                                      <ListTodo size={13} />
+                                    )}
+                                    <span>{currentStatus || 'Action Item'}</span>
+                                    <ChevronDown size={12} style={{ opacity: 0.7 }} />
+                                  </button>
+
+                                  {isOpen && (
+                                    <div
+                                      style={{
+                                        position: 'absolute',
+                                        top: 'calc(100% + 4px)',
+                                        left: 0,
+                                        zIndex: 100,
+                                        minWidth: '145px',
+                                        padding: '6px',
+                                        borderRadius: '10px',
+                                        boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.25), 0 8px 10px -6px rgba(0, 0, 0, 0.1)',
+                                        backgroundColor: 'hsl(var(--card))',
+                                        border: '1px solid hsl(var(--card-border))',
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        gap: '4px'
+                                      }}
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      <button
+                                        type="button"
+                                        onClick={() => handleActionItemChange(note, 'Pending')}
+                                        style={{
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          justifyContent: 'space-between',
+                                          width: '100%',
+                                          padding: '8px 10px',
+                                          borderRadius: '6px',
+                                          border: 'none',
+                                          background: currentStatus === 'Pending' ? 'hsl(var(--warning) / 0.15)' : 'transparent',
+                                          color: currentStatus === 'Pending' ? '#d97706' : 'hsl(var(--foreground))',
+                                          fontSize: '12px',
+                                          fontWeight: 600,
+                                          cursor: 'pointer',
+                                          textAlign: 'left',
+                                          transition: 'background-color 0.15s ease'
+                                        }}
+                                        onMouseEnter={(e) => {
+                                          if (currentStatus !== 'Pending') e.currentTarget.style.backgroundColor = 'hsl(var(--card-border) / 0.5)';
+                                        }}
+                                        onMouseLeave={(e) => {
+                                          if (currentStatus !== 'Pending') e.currentTarget.style.backgroundColor = 'transparent';
+                                        }}
+                                      >
+                                        <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                          <Clock size={13} style={{ color: '#d97706' }} />
+                                          <span>Pending</span>
+                                        </span>
+                                        {currentStatus === 'Pending' && <Check size={13} style={{ color: '#d97706' }} />}
+                                      </button>
+
+                                      <button
+                                        type="button"
+                                        onClick={() => handleActionItemChange(note, 'Completed')}
+                                        style={{
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          justifyContent: 'space-between',
+                                          width: '100%',
+                                          padding: '8px 10px',
+                                          borderRadius: '6px',
+                                          border: 'none',
+                                          background: currentStatus === 'Completed' ? 'hsl(var(--success) / 0.15)' : 'transparent',
+                                          color: currentStatus === 'Completed' ? 'hsl(var(--success))' : 'hsl(var(--foreground))',
+                                          fontSize: '12px',
+                                          fontWeight: 600,
+                                          cursor: 'pointer',
+                                          textAlign: 'left',
+                                          transition: 'background-color 0.15s ease'
+                                        }}
+                                        onMouseEnter={(e) => {
+                                          if (currentStatus !== 'Completed') e.currentTarget.style.backgroundColor = 'hsl(var(--card-border) / 0.5)';
+                                        }}
+                                        onMouseLeave={(e) => {
+                                          if (currentStatus !== 'Completed') e.currentTarget.style.backgroundColor = 'transparent';
+                                        }}
+                                      >
+                                        <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                          <CheckCircle2 size={13} style={{ color: 'hsl(var(--success))' }} />
+                                          <span>Completed</span>
+                                        </span>
+                                        {currentStatus === 'Completed' && <Check size={13} style={{ color: 'hsl(var(--success))' }} />}
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })()}
+                          </td>
+
                           <td style={{ verticalAlign: 'top', textAlign: 'right' }}>
                             <div style={{ display: 'flex', gap: '4px', justifyContent: 'flex-end' }}>
                               <button 
@@ -521,6 +743,51 @@ const Notes: React.FC = () => {
                 </tbody>
               </table>
             </div>
+
+            {/* Pagination Footer */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 0 4px 0', borderTop: '1px solid hsl(var(--card-border))', marginTop: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <label htmlFor="notes-rows-per-page" style={{ fontSize: '13px', fontWeight: 500, color: 'hsl(var(--muted-foreground))' }}>
+                  Rows per page
+                </label>
+                <select
+                  id="notes-rows-per-page"
+                  className="form-select"
+                  value={rowsPerPage}
+                  onChange={(e) => { setRowsPerPage(Number(e.target.value)); setCurrentPage(1); }}
+                  style={{ padding: '5px 28px 5px 10px', borderRadius: '6px', fontSize: '13px', cursor: 'pointer', minWidth: '65px' }}
+                >
+                  <option value={5}>5</option>
+                  <option value={10}>10</option>
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                </select>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                <span style={{ fontSize: '13px', color: 'hsl(var(--muted-foreground))', fontWeight: 500 }}>
+                  Page {currentPage} of {totalPages}
+                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <button
+                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                    disabled={currentPage === 1}
+                    className="btn btn-ghost btn-icon"
+                    style={{ width: '30px', height: '30px', opacity: currentPage === 1 ? 0.4 : 1, cursor: currentPage === 1 ? 'not-allowed' : 'pointer', border: '1px solid hsl(var(--card-border))', borderRadius: '6px', background: 'hsl(var(--background))' }}
+                  >
+                    ‹
+                  </button>
+                  <button
+                    onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                    disabled={currentPage === totalPages}
+                    className="btn btn-ghost btn-icon"
+                    style={{ width: '30px', height: '30px', opacity: currentPage === totalPages ? 0.4 : 1, cursor: currentPage === totalPages ? 'not-allowed' : 'pointer', border: '1px solid hsl(var(--card-border))', borderRadius: '6px', background: 'hsl(var(--background))' }}
+                  >
+                    ›
+                  </button>
+                </div>
+              </div>
+            </div>
+            </>
           )}
         </div>
       </div>

@@ -1,3 +1,48 @@
+export const getResendApiKey = (): string => {
+  return localStorage.getItem('resend_api_key') || (import.meta.env.VITE_RESEND_API_KEY as string) || '';
+};
+
+export const setResendApiKey = (key: string): void => {
+  if (key && key.trim()) {
+    localStorage.setItem('resend_api_key', key.trim());
+  } else {
+    localStorage.removeItem('resend_api_key');
+  }
+};
+
+export const createMailToLink = (
+  employeeEmail: string,
+  employeeName: string,
+  taskTitle: string,
+  taskDescription: string,
+  dueDate: string,
+  priority: string,
+  assignedBy: string = 'Admin'
+): string => {
+  const formattedDueDate = dueDate ? new Date(dueDate).toLocaleDateString() : 'N/A';
+  const subject = encodeURIComponent(`New Task Assigned: ${taskTitle}`);
+  const body = encodeURIComponent(
+    `Hello ${employeeName},\n\n` +
+    `A new task has been assigned to you by ${assignedBy}.\n\n` +
+    `--------------------------------------------------\n` +
+    `Title: ${taskTitle}\n` +
+    `Priority: ${priority}\n` +
+    `Due Date: ${formattedDueDate}\n` +
+    `Description: ${taskDescription || 'No description provided.'}\n` +
+    `--------------------------------------------------\n\n` +
+    `Please log in to the Global Minds Employee Portal to update your task status and submit your daily reports.\n\n` +
+    `Best regards,\n` +
+    `${assignedBy} · Global Minds`
+  );
+  return `mailto:${employeeEmail}?subject=${subject}&body=${body}`;
+};
+
+export interface SendTaskEmailResult {
+  success: boolean;
+  message?: string;
+  mailToUrl: string;
+}
+
 export const sendTaskEmail = async (
   employeeEmail: string,
   employeeName: string,
@@ -5,18 +50,33 @@ export const sendTaskEmail = async (
   taskDescription: string,
   dueDate: string,
   priority: string,
-  assignedBy: string
-) => {
-  const RESEND_API_KEY = import.meta.env.VITE_RESEND_API_KEY;
+  assignedBy: string = 'Admin'
+): Promise<SendTaskEmailResult> => {
+  const mailToUrl = createMailToLink(
+    employeeEmail,
+    employeeName,
+    taskTitle,
+    taskDescription,
+    dueDate,
+    priority,
+    assignedBy
+  );
+
+  const RESEND_API_KEY = getResendApiKey();
 
   if (!RESEND_API_KEY) {
-    console.error('RESEND_API_KEY is not defined in .env');
-    return { success: false, message: 'RESEND_API_KEY is missing from .env file' };
+    return {
+      success: false,
+      message: 'Resend API key is not configured.',
+      mailToUrl
+    };
   }
 
   let priorityColor = '#3b82f6'; // Blue
   if (priority === 'High') priorityColor = '#ef4444'; // Red
   if (priority === 'Low') priorityColor = '#22c55e'; // Green
+
+  const formattedDueDate = dueDate ? new Date(dueDate).toLocaleDateString() : 'N/A';
 
   const htmlContent = `
     <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e5e7eb; border-radius: 8px;">
@@ -31,7 +91,7 @@ export const sendTaskEmail = async (
           <strong>Priority:</strong> 
           <span style="color: ${priorityColor}; font-weight: bold;">${priority}</span>
         </p>
-        <p style="margin: 0; color: #111827;"><strong>Due Date:</strong> ${new Date(dueDate).toLocaleDateString()}</p>
+        <p style="margin: 0; color: #111827;"><strong>Due Date:</strong> ${formattedDueDate}</p>
       </div>
       
       <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">
@@ -48,7 +108,7 @@ export const sendTaskEmail = async (
         'Authorization': `Bearer ${RESEND_API_KEY}`,
       },
       body: JSON.stringify({
-        from: 'Global Minds <onboarding@resend.dev>', // resend.dev only allows sending to the email you signed up with
+        from: 'Global Minds <onboarding@resend.dev>',
         to: [employeeEmail],
         subject: `New Task Assigned: ${taskTitle}`,
         html: htmlContent,
@@ -56,14 +116,13 @@ export const sendTaskEmail = async (
     });
 
     if (res.ok) {
-      return { success: true };
+      return { success: true, mailToUrl };
     } else {
-      const errorData = await res.json();
-      console.error('Failed to send email via Resend:', errorData);
-      return { success: false, message: errorData.message || JSON.stringify(errorData) };
+      const errorData = await res.json().catch(() => ({}));
+      const msg = errorData.message || res.statusText || 'Resend API returned an error';
+      return { success: false, message: msg, mailToUrl };
     }
   } catch (error: any) {
-    console.error('Error sending email:', error);
-    return { success: false, message: error.message };
+    return { success: false, message: error.message || 'Network error sending email', mailToUrl };
   }
 };

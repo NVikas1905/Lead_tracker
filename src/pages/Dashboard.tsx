@@ -7,11 +7,15 @@ import {
   X,
   Save,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  Phone,
+  Package,
+  IndianRupee,
+  PhoneOff,
+  Info,
+  Zap
 } from 'lucide-react';
-import CommandBox from '../components/CommandBox';
 import EnquiryCard from '../components/EnquiryCard';
-import TerminalLog from '../components/TerminalLog';
 import {
   getLocalEnquiries,
   getLocalCourses,
@@ -19,30 +23,31 @@ import {
   updateLocalEnquiry
 } from '../lib/localDatabase';
 import type { Enquiry, Course, Category } from '../lib/localDatabase';
-import { callAssistant } from '../lib/assistant';
-import type { AssistantResponse } from '../lib/assistant';
-import type { TerminalLine } from '../lib/geminiSim';
 import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
 
 interface DashboardProps {
   isDemo: boolean;
   refreshTrigger: number;
   onUpdate: () => void;
+  onNavigateToLead?: (prefillName?: string) => void;
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({
   isDemo,
   refreshTrigger,
-  onUpdate
+  onUpdate,
+  onNavigateToLead
 }) => {
   const [enquiries, setEnquiries] = useState<Enquiry[]>([]);
   const [courses, setCourses] = useState<Course[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
-  const [logs, setLogs] = useState<TerminalLine[]>([]);
 
-  const [isLoading, setIsLoading] = useState(false);
-  const [lastReply, setLastReply] = useState<string | null>(null);
-  const [lastReplySuccess, setLastReplySuccess] = useState<boolean>(true);
+  // Toast feedback state (replaces blocking alerts)
+  const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
+  const showToast = (text: string, type: 'success' | 'info' | 'error' = 'info') => {
+    setToastMessage({ text, type });
+    setTimeout(() => setToastMessage(null), 4000);
+  };
 
   // Edit Modal State
   const [editingEnquiry, setEditingEnquiry] = useState<Enquiry | null>(null);
@@ -54,6 +59,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   // User input for dynamic reminder reschedule interval (in days)
   const [reminderDays, setReminderDays] = useState<number>(2);
+
+  // Last run timestamp for cron job simulator
+  const [lastRunText, setLastRunText] = useState<string>('not run in this session');
+
+  // Leads needing action filter
+  const [actionFilter, setActionFilter] = useState<'all' | 'unreachable' | 'pending'>('all');
 
   const fetchDashboardData = async () => {
     if (!isDemo && isSupabaseConfigured() && supabase) {
@@ -88,27 +99,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
     fetchDashboardData();
   }, [isDemo, refreshTrigger]);
 
-  // Handle Command Submission
-  const handleCommandSubmit = async (command: string) => {
-    setIsLoading(true);
-    setLastReply(null);
-
-    // Dispatch to assistant handler
-    const response: AssistantResponse = await callAssistant(command, isDemo);
-
-    // Merge new logs with existing logs
-    setLogs(prev => [...prev, ...response.logs]);
-    setLastReply(response.reply);
-    setLastReplySuccess(response.success);
-    setIsLoading(false);
-
-    // If successful, reload data to update lists
-    if (response.success) {
-      fetchDashboardData();
-      onUpdate();
-    }
-  };
-
   // Simulating the Supabase Cron Job Reminder checker
   const handleTriggerReminders = () => {
     const now = new Date();
@@ -118,18 +108,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
       return isUnresolved && isDue;
     });
 
-    const newLogLine = (content: string, type: 'system' | 'success' | 'error' = 'system') => ({
-      id: Math.random().toString(36).substr(2, 9),
-      timestamp: new Date().toLocaleTimeString(),
-      prefix: type,
-      content
-    });
-
-    setLogs(prev => [...prev, newLogLine('Cron Job check-reminders triggered.', 'system')]);
-
     if (dueEnquiries.length === 0) {
-      setLogs(prev => [...prev, newLogLine('No unresolved enquiries are due for reminders at this time.', 'system')]);
-      alert('All reminders are up-to-date! No enquiries are due for reminders.');
+      showToast('All reminders are up-to-date! No enquiries are due for reminders.', 'info');
       return;
     }
 
@@ -152,12 +132,31 @@ export const Dashboard: React.FC<DashboardProps> = ({
       }
     });
 
-    setLogs(prev => [...prev, newLogLine(`Cron Job completed: Rescheduled ${dueEnquiries.length} reminders (+${reminderDays} days).`, 'success')]);
+    const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    setLastRunText(`Last run at ${timeStr}`);
+    showToast(`Cron Job completed: Rescheduled ${dueEnquiries.length} reminders (+${reminderDays} days).`, 'success');
 
     // Refresh
     setTimeout(() => {
       fetchDashboardData();
     }, 500);
+  };
+
+  const handleToggleStatus = (
+    enquiry: Enquiry,
+    field: 'interested' | 'follow_up_done' | 'can_follow_up',
+    currentVal: boolean | null
+  ) => {
+    const nextVal = currentVal === null ? true : currentVal === true ? false : null;
+    if (!isDemo && isSupabaseConfigured() && supabase) {
+      supabase.from('enquiries').update({
+        [field]: nextVal,
+        updated_at: new Date().toISOString()
+      }).eq('id', enquiry.id);
+    }
+    updateLocalEnquiry(enquiry.id, { [field]: nextVal });
+    fetchDashboardData();
+    onUpdate();
   };
 
   const handleSaveEdit = async (e: React.FormEvent) => {
@@ -168,24 +167,38 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
     try {
       if (!isDemo && isSupabaseConfigured() && supabase) {
+        const updatePayload: any = {
+          contact_name: editingEnquiry.contact_name,
+          contact_phone: editingEnquiry.contact_phone || null,
+          course_id: editingEnquiry.course_id,
+          category_id: editingEnquiry.category_id,
+          fee_shared: editingEnquiry.fee_shared,
+          payment: editingEnquiry.payment,
+          notes: editingEnquiry.notes || null,
+          interested: editingEnquiry.interested,
+          follow_up_done: editingEnquiry.follow_up_done,
+          can_follow_up: editingEnquiry.can_follow_up,
+          next_reminder_at: editingEnquiry.next_reminder_at,
+          updated_at: new Date().toISOString()
+        };
+
         const { error } = await supabase
           .from('enquiries')
-          .update({
-            contact_name: editingEnquiry.contact_name,
-            contact_phone: editingEnquiry.contact_phone || null,
-            course_id: editingEnquiry.course_id,
-            category_id: editingEnquiry.category_id,
-            fee_shared: editingEnquiry.fee_shared,
-            notes: editingEnquiry.notes || null,
-            interested: editingEnquiry.interested,
-            follow_up_done: editingEnquiry.follow_up_done,
-            can_follow_up: editingEnquiry.can_follow_up,
-            next_reminder_at: editingEnquiry.next_reminder_at,
-            updated_at: new Date().toISOString()
-          })
+          .update(updatePayload)
           .eq('id', editingEnquiry.id);
 
-        if (error) throw error;
+        if (error) {
+          if (error.message?.includes('payment') || error.code === 'PGRST204') {
+            const { payment: _, ...fallbackPayload } = updatePayload;
+            const { error: fallbackError } = await supabase
+              .from('enquiries')
+              .update(fallbackPayload)
+              .eq('id', editingEnquiry.id);
+            if (fallbackError) throw fallbackError;
+          } else {
+            throw error;
+          }
+        }
       } else {
         updateLocalEnquiry(editingEnquiry.id, {
           contact_name: editingEnquiry.contact_name,
@@ -193,6 +206,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           course_id: editingEnquiry.course_id,
           category_id: editingEnquiry.category_id,
           fee_shared: editingEnquiry.fee_shared,
+          payment: editingEnquiry.payment,
           notes: editingEnquiry.notes || '',
           interested: editingEnquiry.interested,
           follow_up_done: editingEnquiry.follow_up_done,
@@ -205,134 +219,424 @@ export const Dashboard: React.FC<DashboardProps> = ({
       fetchDashboardData();
       onUpdate();
     } catch (err: any) {
-      alert(`Failed to save changes: ${err.message || err}`);
+      showToast(`Failed to save changes: ${err.message || err}`, 'error');
     } finally {
       setIsSavingEdit(false);
     }
   };
 
-  // Helper to count active/unresolved enquiries
-  const unresolvedEnquiries = enquiries.filter(e =>
-    e.interested === null || e.follow_up_done === null || e.can_follow_up === null
-  );
+  // 1. Unresolved leads
+  const unresolvedEnquiries = enquiries
+    .filter(e => e.interested === null || e.follow_up_done === null || e.can_follow_up === null)
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
-  // Helper to count due reminders
+  // 2. Reminders due
   const dueReminderCount = enquiries.filter(e => {
     const isUnresolved = e.interested === null || e.follow_up_done === null || e.can_follow_up === null;
     return isUnresolved && new Date(e.next_reminder_at) <= new Date();
   }).length;
 
-  const totalPages = Math.ceil(enquiries.length / rowsPerPage) || 1;
+  // 3. Fee shared
+  const feeSharedCount = enquiries.filter(e => e.fee_shared).length;
+
+  // 4. Not reachable
+  const notReachableCount = enquiries.filter(e => e.can_follow_up === false).length;
+
+  // 5. Follow up pending
+  const followUpPendingCount = enquiries.filter(e => e.follow_up_done === null).length;
+
+  // Division breakdown
+  const academyCategory = categories.find(c => c.name.toLowerCase().includes('academy'));
+  const techCategory = categories.find(c => c.name.toLowerCase().includes('tech'));
+  const academyCount = enquiries.filter(e => academyCategory && e.category_id === academyCategory.id).length;
+  const techCount = enquiries.filter(e => techCategory && e.category_id === techCategory.id).length;
+  const totalDiv = (academyCount + techCount) || 1;
+  const techPercent = Math.round((techCount / totalDiv) * 100);
+  const academyPercent = 100 - techPercent;
+
+  // Top courses by interest
+  const courseInterestCounts = courses
+    .map(c => ({
+      name: c.name,
+      count: enquiries.filter(e => e.course_id === c.id).length
+    }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 6);
+
+  const maxCourseCount = Math.max(...courseInterestCounts.map(c => c.count), 1);
+
+  // Filtered action leads based on filter pills
+  const filteredActionLeads = unresolvedEnquiries.filter(e => {
+    if (actionFilter === 'unreachable') return e.can_follow_up === false;
+    if (actionFilter === 'pending') return e.follow_up_done === null;
+    return true;
+  });
+
+  const filteredAllEnquiries = enquiries
+    .slice()
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+  const totalPages = Math.ceil(filteredAllEnquiries.length / rowsPerPage) || 1;
   const startIndex = (currentPage - 1) * rowsPerPage;
-  const paginatedEnquiries = enquiries.slice(startIndex, startIndex + rowsPerPage);
+  const paginatedEnquiries = filteredAllEnquiries.slice(startIndex, startIndex + rowsPerPage);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
 
-      {/* Main split grid: CLI Console & Cron scheduler controls */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '24px' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '24px', alignItems: 'start' }}>
+      {/* Toast Feedback Notification (Non-blocking) */}
+      {toastMessage && (
+        <div
+          style={{
+            padding: '12px 18px',
+            borderRadius: '10px',
+            backgroundColor: toastMessage.type === 'error' ? 'hsl(var(--danger) / 0.15)' : toastMessage.type === 'success' ? 'hsl(var(--success) / 0.15)' : 'hsl(var(--primary) / 0.15)',
+            border: `1px solid ${toastMessage.type === 'error' ? 'hsl(var(--danger))' : toastMessage.type === 'success' ? 'hsl(var(--success))' : 'hsl(var(--primary))'}`,
+            color: toastMessage.type === 'error' ? 'hsl(var(--danger))' : toastMessage.type === 'success' ? 'hsl(var(--success))' : 'hsl(var(--primary))',
+            fontSize: '14px',
+            fontWeight: 600,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.1)'
+          }}
+        >
+          <span>{toastMessage.text}</span>
+          <button onClick={() => setToastMessage(null)} style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: '16px' }}>✕</button>
+        </div>
+      )}
 
-          {/* CLI input & console logs */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-            <CommandBox
-              onSubmit={handleCommandSubmit}
-              isLoading={isLoading}
-              lastReply={lastReply}
-              lastReplySuccess={lastReplySuccess}
-            />
-            <TerminalLog
-              logs={logs}
-              onClear={() => setLogs([])}
-            />
+      {/* Overview Section (Matching Reference Screenshot 1) */}
+      <div>
+        <h2 style={{ fontSize: '17px', fontWeight: 800, color: '#162e3b', marginBottom: '14px' }}>
+          Overview
+        </h2>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: '16px' }}>
+          {/* Card 1: 9 Unresolved leads */}
+          <div className="glass-card" style={{ padding: '18px 20px', display: 'flex', alignItems: 'center', gap: '16px' }}>
+            <div className="metric-icon-box">
+              <Package size={22} />
+            </div>
+            <div>
+              <div style={{ fontSize: '26px', fontWeight: 800, color: '#162e3b', lineHeight: 1.1 }}>
+                {unresolvedEnquiries.length}
+              </div>
+              <div style={{ fontSize: '13px', color: '#5b7b88', fontWeight: 600, marginTop: '3px' }}>
+                Unresolved leads
+              </div>
+            </div>
           </div>
 
-          {/* Trigger Cron Reminder panel */}
-          <div className="glass-card" style={{ height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+          {/* Card 2: 8 Reminders due */}
+          <div className="glass-card" style={{ padding: '18px 20px', display: 'flex', alignItems: 'center', gap: '16px' }}>
+            <div className="metric-icon-box">
+              <Bell size={22} />
+            </div>
             <div>
-              <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '12px' }}>
-                <CloudLightning size={20} style={{ color: 'hsl(var(--primary))' }} />
-                <h3 style={{ fontSize: '16px', fontWeight: 700 }}>Cron Job Simulator</h3>
+              <div style={{ fontSize: '26px', fontWeight: 800, color: '#162e3b', lineHeight: 1.1 }}>
+                {dueReminderCount}
               </div>
-              <p style={{ fontSize: '13px', color: 'hsl(var(--muted))', lineHeight: 1.4 }}>
-                Supabase uses a PG Cron trigger to check reminders at interval. Clicking the button scans open leads and postpones due reminders by the specified interval.
-              </p>
+              <div style={{ fontSize: '13px', color: '#5b7b88', fontWeight: 600, marginTop: '3px' }}>
+                Reminders due
+              </div>
+            </div>
+          </div>
 
-              <div
+          {/* Card 3: 6 Fee shared */}
+          <div className="glass-card" style={{ padding: '18px 20px', display: 'flex', alignItems: 'center', gap: '16px' }}>
+            <div className="metric-icon-box">
+              <span style={{ fontSize: '20px', fontWeight: 800 }}>₹</span>
+            </div>
+            <div>
+              <div style={{ fontSize: '26px', fontWeight: 800, color: '#162e3b', lineHeight: 1.1 }}>
+                {feeSharedCount}
+              </div>
+              <div style={{ fontSize: '13px', color: '#5b7b88', fontWeight: 600, marginTop: '3px' }}>
+                Fee shared
+              </div>
+            </div>
+          </div>
+
+          {/* Card 4: 2 Not reachable (Peach Tinted Card) */}
+          <div className="glass-card metric-card-peach" style={{ padding: '18px 20px', display: 'flex', alignItems: 'center', gap: '16px', position: 'relative' }}>
+            <div className="metric-icon-box">
+              <PhoneOff size={22} />
+            </div>
+            <div>
+              <div style={{ fontSize: '26px', fontWeight: 800, color: '#162e3b', lineHeight: 1.1 }}>
+                {notReachableCount}
+              </div>
+              <div style={{ fontSize: '13px', color: '#78350f', fontWeight: 600, marginTop: '3px' }}>
+                Not reachable
+              </div>
+            </div>
+            <Info size={16} style={{ position: 'absolute', bottom: '12px', right: '14px', color: '#ea580c', opacity: 0.6 }} />
+          </div>
+        </div>
+      </div>
+
+      {/* Middle Row (3-Column Grid matching Screenshot 1) */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '20px' }}>
+        {/* Column 1: Cron job simulator */}
+        <div className="glass-card" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+          <div>
+            <h3 style={{ fontSize: '16px', fontWeight: 800, color: '#162e3b', marginBottom: '8px' }}>
+              Cron job simulator
+            </h3>
+            <p style={{ fontSize: '13px', color: '#5b7b88', lineHeight: 1.45, margin: '0 0 16px 0' }}>
+              Supabase runs a scheduled check on the reminder interval. Run it here to scan open leads and push back any reminder that's due.
+            </p>
+
+            <div style={{ marginBottom: '14px' }}>
+              <label style={{ display: 'block', fontSize: '12px', color: '#5b7b88', fontWeight: 600, marginBottom: '6px' }}>
+                Interval (days)
+              </label>
+              <input
+                type="number"
+                min="1"
+                value={reminderDays}
+                onChange={(e) => setReminderDays(Math.max(1, parseInt(e.target.value) || 1))}
                 style={{
-                  margin: '16px 0',
-                  padding: '12px',
-                  backgroundColor: 'hsl(var(--background))',
-                  border: '1px solid hsl(var(--card-border))',
+                  width: '80px',
+                  padding: '7px 12px',
                   borderRadius: '8px',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '10px'
+                  border: '1px solid #cbe0e8',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  outline: 'none',
+                  backgroundColor: '#ffffff',
+                  color: '#162e3b'
                 }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
-                  <span>Unresolved Leads:</span>
-                  <span style={{ fontWeight: 'bold' }}>{unresolvedEnquiries.length}</span>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
-                  <span>Reminders Due:</span>
-                  <span style={{ fontWeight: 'bold', color: dueReminderCount > 0 ? 'hsl(var(--warning))' : 'hsl(var(--success))' }}>
-                    {dueReminderCount}
-                  </span>
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', borderTop: '1px solid hsl(var(--card-border))', paddingTop: '10px', marginTop: '4px' }}>
-                  <label style={{ fontSize: '11px', fontWeight: 600, color: 'hsl(var(--muted))' }}>
-                    Reschedule Interval (Days):
-                  </label>
-                  <input
-                    type="number"
-                    min="1"
-                    className="form-input"
-                    style={{ width: '100%', fontSize: '13px', padding: '6px 10px' }}
-                    value={reminderDays}
-                    onChange={(e) => setReminderDays(Math.max(1, parseInt(e.target.value) || 1))}
-                    placeholder="Enter days (e.g. 2, 5, 7)"
-                  />
-                </div>
-              </div>
+              />
             </div>
 
             <button
               onClick={handleTriggerReminders}
               className="btn btn-primary"
-              style={{ width: '100%' }}
+              style={{
+                backgroundColor: '#1f4854',
+                color: '#ffffff',
+                padding: '9px 18px',
+                borderRadius: '8px',
+                fontWeight: 700,
+                fontSize: '13px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                border: 'none',
+                cursor: 'pointer'
+              }}
             >
-              <Bell size={16} /> Run Reminder Cron Job (+{reminderDays} Days)
+              <Zap size={15} />
+              <span>Run reminder job (+{reminderDays}d)</span>
             </button>
           </div>
 
+          <div
+            style={{
+              marginTop: '16px',
+              padding: '7px 12px',
+              backgroundColor: '#eaf2f5',
+              borderRadius: '8px',
+              fontSize: '12px',
+              color: '#5b7b88',
+              fontWeight: 500
+            }}
+          >
+            Last run: {lastRunText}
+          </div>
+        </div>
+
+        {/* Column 2: Leads by division */}
+        <div className="glass-card" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+          <div>
+            <h3 style={{ fontSize: '16px', fontWeight: 800, color: '#162e3b', marginBottom: '14px' }}>
+              Leads by division
+            </h3>
+
+            {/* SVG Donut Chart */}
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', margin: '8px 0 16px 0' }}>
+              <div style={{ position: 'relative', width: '130px', height: '130px' }}>
+                <svg viewBox="0 0 36 36" style={{ width: '100%', height: '100%', transform: 'rotate(-90deg)' }}>
+                  {/* Background / Tech segment */}
+                  <circle
+                    cx="18"
+                    cy="18"
+                    r="15.915"
+                    fill="none"
+                    stroke="#477987"
+                    strokeWidth="4"
+                  />
+                  {/* Academy segment */}
+                  <circle
+                    cx="18"
+                    cy="18"
+                    r="15.915"
+                    fill="none"
+                    stroke="#b6d3dc"
+                    strokeWidth="4"
+                    strokeDasharray={`${academyPercent} ${100 - academyPercent}`}
+                    strokeDashoffset="0"
+                  />
+                </svg>
+                <div
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: '13px',
+                    fontWeight: 800,
+                    color: '#162e3b'
+                  }}
+                >
+                  <span style={{ fontSize: '14px', color: '#477987' }}>{techPercent}%</span>
+                  <span style={{ fontSize: '12px', color: '#7a9aa7' }}>{academyPercent}%</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Division Legend */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', borderTop: '1px solid #eef4f7', paddingTop: '12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px' }}>
+              <span style={{ width: '12px', height: '12px', borderRadius: '3px', backgroundColor: '#b6d3dc' }} />
+              <span style={{ color: '#162e3b', fontWeight: 600 }}>Academy</span>
+              <span style={{ color: '#7a9aa7', marginLeft: 'auto' }}>{academyCount} leads</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px' }}>
+              <span style={{ width: '12px', height: '12px', borderRadius: '3px', backgroundColor: '#477987' }} />
+              <span style={{ color: '#162e3b', fontWeight: 600 }}>Technologies</span>
+              <span style={{ color: '#7a9aa7', marginLeft: 'auto' }}>{techCount} leads</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Column 3: Top courses by interest */}
+        <div className="glass-card">
+          <h3 style={{ fontSize: '16px', fontWeight: 800, color: '#162e3b', marginBottom: '14px' }}>
+            Top courses by interest
+          </h3>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            {courseInterestCounts.map((courseItem, idx) => {
+              const barWidthPercent = Math.max(12, Math.round((courseItem.count / maxCourseCount) * 100));
+
+              return (
+                <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '12.5px' }}>
+                  <span
+                    style={{
+                      width: '130px',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      color: '#162e3b',
+                      fontWeight: 600
+                    }}
+                    title={courseItem.name}
+                  >
+                    {courseItem.name}
+                  </span>
+
+                  <div style={{ flex: 1, backgroundColor: '#eef5f8', height: '8px', borderRadius: '4px', overflow: 'hidden' }}>
+                    <div
+                      style={{
+                        width: `${barWidthPercent}%`,
+                        backgroundColor: '#477987',
+                        height: '100%',
+                        borderRadius: '4px',
+                        transition: 'width 0.3s ease'
+                      }}
+                    />
+                  </div>
+
+                  <span style={{ width: '16px', textAlign: 'right', color: '#5b7b88', fontWeight: 700, fontSize: '12px' }}>
+                    {courseItem.count}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
         </div>
       </div>
 
       {/* Leads board requiring action */}
       <div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-          <h2 style={{ fontSize: '18px', fontWeight: 800 }}>Leads Needing Action ({unresolvedEnquiries.length})</h2>
-          <span style={{ fontSize: '12px', color: 'hsl(var(--muted))' }}>
-            System continues reminders until all three checklist fields are non-null.
-          </span>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
+          <h2 style={{ fontSize: '18px', fontWeight: 800, color: '#162e3b' }}>
+            Leads needing action ({filteredActionLeads.length})
+          </h2>
+
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            <button
+              onClick={() => setActionFilter('all')}
+              style={{
+                padding: '6px 14px',
+                borderRadius: '9999px',
+                fontSize: '12px',
+                fontWeight: 700,
+                cursor: 'pointer',
+                backgroundColor: actionFilter === 'all' ? '#477987' : '#ffffff',
+                color: actionFilter === 'all' ? '#ffffff' : '#345967',
+                border: actionFilter === 'all' ? 'none' : '1px solid #cbe0e8',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.03)'
+              }}
+            >
+              All ({unresolvedEnquiries.length})
+            </button>
+
+            <button
+              onClick={() => setActionFilter('unreachable')}
+              style={{
+                padding: '6px 14px',
+                borderRadius: '9999px',
+                fontSize: '12px',
+                fontWeight: 700,
+                cursor: 'pointer',
+                backgroundColor: actionFilter === 'unreachable' ? '#477987' : '#ffffff',
+                color: actionFilter === 'unreachable' ? '#ffffff' : '#345967',
+                border: actionFilter === 'unreachable' ? 'none' : '1px solid #cbe0e8',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.03)'
+              }}
+            >
+              Not reachable ({notReachableCount})
+            </button>
+
+            <button
+              onClick={() => setActionFilter('pending')}
+              style={{
+                padding: '6px 14px',
+                borderRadius: '9999px',
+                fontSize: '12px',
+                fontWeight: 700,
+                cursor: 'pointer',
+                backgroundColor: actionFilter === 'pending' ? '#477987' : '#ffffff',
+                color: actionFilter === 'pending' ? '#ffffff' : '#345967',
+                border: actionFilter === 'pending' ? 'none' : '1px solid #cbe0e8',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.03)'
+              }}
+            >
+              Follow-up pending ({followUpPendingCount})
+            </button>
+          </div>
         </div>
 
-        {unresolvedEnquiries.length === 0 ? (
-          <div className="glass-card" style={{ textAlign: 'center', padding: '36px', color: 'hsl(var(--muted))' }}>
-            <CheckCircle size={32} style={{ color: 'hsl(var(--success))', display: 'block', margin: '0 auto 12px' }} />
+        {filteredActionLeads.length === 0 ? (
+          <div className="glass-card" style={{ textAlign: 'center', padding: '36px', color: '#5b7b88' }}>
+            <CheckCircle size={32} style={{ color: '#1ba37c', display: 'block', margin: '0 auto 12px' }} />
             All logged enquiries are fully resolved. No action items remaining!
           </div>
         ) : (
-          <div className="enquiry-grid">
-            {unresolvedEnquiries.map(enq => (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '20px' }}>
+            {filteredActionLeads.map(enq => (
               <EnquiryCard
                 key={enq.id}
                 enquiry={enq}
                 courses={courses}
                 categories={categories}
                 onEdit={(targetEnq) => setEditingEnquiry(targetEnq)}
+                onToggleStatus={handleToggleStatus}
               />
             ))}
           </div>
@@ -341,7 +645,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
       {/* Database table showing everything */}
       <div className="glass-card">
-        <h2 style={{ fontSize: '18px', fontWeight: 800, marginBottom: '16px' }}>Full Leads Ledger</h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
+          <h2 style={{ fontSize: '18px', fontWeight: 800 }}>
+            Full Leads Ledger ({filteredAllEnquiries.length})
+          </h2>
+        </div>
         <div className="table-wrapper">
           <table className="admin-table">
             <thead>
@@ -350,7 +658,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 <th>Course Interest</th>
                 <th>Category</th>
                 <th>Phone</th>
-                <th>Fee shared</th>
+                <th>Details shared</th>
                 <th>Next Alert</th>
                 <th>Resolution Status</th>
                 <th style={{ textAlign: 'center' }}>Actions</th>
@@ -373,9 +681,20 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     </td>
                     <td>{e.contact_phone || '-'}</td>
                     <td>
-                      <span style={{ color: e.fee_shared ? 'hsl(var(--success))' : 'hsl(var(--muted))', fontWeight: 600 }}>
-                        {e.fee_shared ? 'Shared' : 'Pending'}
-                      </span>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                        <span style={{ color: e.fee_shared ? 'hsl(var(--success))' : 'hsl(var(--muted))', fontWeight: 600 }}>
+                          {e.fee_shared ? 'Shared' : 'Pending'}
+                        </span>
+                        {e.payment && (
+                          <span style={{ 
+                            fontSize: '11px', 
+                            fontWeight: 600, 
+                            color: e.payment === 'Completed' ? 'hsl(var(--success))' : e.payment === 'Partially Paid' ? '#d97706' : 'hsl(var(--muted))' 
+                          }}>
+                            {e.payment}
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td style={{ fontSize: '12px', color: 'hsl(var(--muted))' }}>
                       {isRes ? 'Resolved' : new Date(e.next_reminder_at).toLocaleDateString([], { month: 'short', day: 'numeric' })}
@@ -425,10 +744,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   </tr>
                 );
               })}
-              {enquiries.length === 0 && (
+              {paginatedEnquiries.length === 0 && (
                 <tr>
                   <td colSpan={8} style={{ textAlign: 'center', padding: '24px', color: 'hsl(var(--muted))' }}>
-                    No leads recorded. Use the CLI input to log a new enquiry.
+                    No leads recorded yet.
                   </td>
                 </tr>
               )}
@@ -593,7 +912,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 </div>
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '20px' }}>
                 <div>
                   <label style={{ display: 'flex', alignItems: 'center', gap: '12px', cursor: 'pointer', fontSize: '14px', fontWeight: 500, marginTop: '34px', color: 'hsl(var(--foreground))' }}>
                     <input
@@ -602,8 +921,24 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       onChange={e => setEditingEnquiry({ ...editingEnquiry, fee_shared: e.target.checked })}
                       style={{ width: '18px', height: '18px', accentColor: 'hsl(var(--primary))', borderRadius: '4px' }}
                     />
-                    Fee Shared with Lead
+                    Details Shared with Lead
                   </label>
+                </div>
+
+                <div>
+                  <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, color: 'hsl(var(--foreground))', marginBottom: '8px' }}>
+                    Payment Status
+                  </label>
+                  <select
+                    className="form-input"
+                    style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', background: 'hsl(var(--background))' }}
+                    value={editingEnquiry.payment || 'Pending'}
+                    onChange={e => setEditingEnquiry({ ...editingEnquiry, payment: e.target.value })}
+                  >
+                    <option value="Pending">Pending</option>
+                    <option value="Partially Paid">Partially Paid</option>
+                    <option value="Completed">Completed</option>
+                  </select>
                 </div>
 
                 <div>

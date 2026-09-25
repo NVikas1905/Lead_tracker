@@ -52,7 +52,7 @@ export const PendingTasks: React.FC<PendingTasksProps> = ({
       try {
         const { data: cats } = await supabase.from('categories').select('*');
         const { data: crs } = await supabase.from('courses').select('*');
-        const { data: enqs } = await supabase.from('enquiries').select('*').order('next_reminder_at', { ascending: true });
+        const { data: enqs } = await supabase.from('enquiries').select('*').order('created_at', { ascending: false });
         
         if (cats) setCategories(cats);
         if (crs) setCourses(crs);
@@ -71,15 +71,15 @@ export const PendingTasks: React.FC<PendingTasksProps> = ({
     fetchPendingData();
   }, [isDemo, refreshTrigger]);
 
-  // Filter only unresolved tasks (checklist fields incomplete)
-  const unresolvedTasks = enquiries.filter(e => 
-    e.interested === null || e.follow_up_done === null || e.can_follow_up === null
-  );
+  // Filter unresolved tasks and ensure newly created leads display on TOP of the list
+  const unresolvedTasks = enquiries
+    .filter(e => e.interested === null || e.follow_up_done === null || e.can_follow_up === null)
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
-  // Completed tasks — all checklist fields are set (non-null)
-  const completedTasks = enquiries.filter(e =>
-    e.interested !== null && e.follow_up_done !== null && e.can_follow_up !== null
-  );
+  // Completed tasks — all checklist fields are set (non-null) sorted by most recent
+  const completedTasks = enquiries
+    .filter(e => e.interested !== null && e.follow_up_done !== null && e.can_follow_up !== null)
+    .sort((a, b) => new Date(b.updated_at || b.created_at).getTime() - new Date(a.updated_at || a.created_at).getTime());
 
   const now = new Date();
   
@@ -190,24 +190,38 @@ export const PendingTasks: React.FC<PendingTasksProps> = ({
 
     try {
       if (!isDemo && isSupabaseConfigured() && supabase) {
+        const updatePayload: any = {
+          contact_name: editingEnquiry.contact_name,
+          contact_phone: editingEnquiry.contact_phone || null,
+          course_id: editingEnquiry.course_id,
+          category_id: editingEnquiry.category_id,
+          fee_shared: editingEnquiry.fee_shared,
+          payment: editingEnquiry.payment,
+          notes: editingEnquiry.notes || null,
+          interested: editingEnquiry.interested,
+          follow_up_done: editingEnquiry.follow_up_done,
+          can_follow_up: editingEnquiry.can_follow_up,
+          next_reminder_at: editingEnquiry.next_reminder_at,
+          updated_at: new Date().toISOString()
+        };
+
         const { error } = await supabase
           .from('enquiries')
-          .update({
-            contact_name: editingEnquiry.contact_name,
-            contact_phone: editingEnquiry.contact_phone || null,
-            course_id: editingEnquiry.course_id,
-            category_id: editingEnquiry.category_id,
-            fee_shared: editingEnquiry.fee_shared,
-            notes: editingEnquiry.notes || null,
-            interested: editingEnquiry.interested,
-            follow_up_done: editingEnquiry.follow_up_done,
-            can_follow_up: editingEnquiry.can_follow_up,
-            next_reminder_at: editingEnquiry.next_reminder_at,
-            updated_at: new Date().toISOString()
-          })
+          .update(updatePayload)
           .eq('id', editingEnquiry.id);
 
-        if (error) throw error;
+        if (error) {
+          if (error.message?.includes('payment') || error.code === 'PGRST204') {
+            const { payment: _, ...fallbackPayload } = updatePayload;
+            const { error: fallbackError } = await supabase
+              .from('enquiries')
+              .update(fallbackPayload)
+              .eq('id', editingEnquiry.id);
+            if (fallbackError) throw fallbackError;
+          } else {
+            throw error;
+          }
+        }
       } else {
         updateLocalEnquiry(editingEnquiry.id, {
           contact_name: editingEnquiry.contact_name,
@@ -215,6 +229,7 @@ export const PendingTasks: React.FC<PendingTasksProps> = ({
           course_id: editingEnquiry.course_id,
           category_id: editingEnquiry.category_id,
           fee_shared: editingEnquiry.fee_shared,
+          payment: editingEnquiry.payment,
           notes: editingEnquiry.notes || '',
           interested: editingEnquiry.interested,
           follow_up_done: editingEnquiry.follow_up_done,
@@ -434,6 +449,16 @@ export const PendingTasks: React.FC<PendingTasksProps> = ({
                         <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                           <Calendar size={13} /> Alert Due: <strong style={{ color: 'hsl(var(--foreground))' }}>{reminderDateFormatted}</strong>
                         </span>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          Details: <strong style={{ color: task.fee_shared ? '#16a34a' : 'hsl(var(--muted))' }}>{task.fee_shared ? 'Shared' : 'Pending'}</strong>
+                        </span>
+                        {task.payment && (
+                          <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            Payment: <strong style={{ 
+                              color: task.payment === 'Completed' ? '#16a34a' : task.payment === 'Partially Paid' ? '#d97706' : 'hsl(var(--muted))' 
+                            }}>{task.payment}</strong>
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -679,7 +704,7 @@ export const PendingTasks: React.FC<PendingTasksProps> = ({
                 </div>
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '16px' }}>
                 <div>
                   <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', fontSize: '13px', fontWeight: 600, marginTop: '24px' }}>
                     <input 
@@ -688,8 +713,24 @@ export const PendingTasks: React.FC<PendingTasksProps> = ({
                       onChange={e => setEditingEnquiry({ ...editingEnquiry, fee_shared: e.target.checked })}
                       style={{ width: '16px', height: '16px', accentColor: 'hsl(var(--primary))' }}
                     />
-                    Fee Shared with Lead
+                    Details Shared with Lead
                   </label>
+                </div>
+
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: 'hsl(var(--muted))', marginBottom: '6px' }}>
+                    Payment Status
+                  </label>
+                  <select
+                    className="input"
+                    style={{ width: '100%', background: 'hsl(var(--background))' }}
+                    value={editingEnquiry.payment || 'Pending'}
+                    onChange={e => setEditingEnquiry({ ...editingEnquiry, payment: e.target.value })}
+                  >
+                    <option value="Pending">Pending</option>
+                    <option value="Partially Paid">Partially Paid</option>
+                    <option value="Completed">Completed</option>
+                  </select>
                 </div>
 
                 <div>

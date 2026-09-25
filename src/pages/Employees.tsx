@@ -1,11 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Edit2, Trash2, X, Users, Check, UserPlus, Phone, MapPin, Briefcase, Hash, Search, Mail, CreditCard, FileText, Upload, FileCheck, ClipboardList, Calendar } from 'lucide-react';
+import { Edit2, Trash2, X, Users, Check, UserPlus, Phone, MapPin, Briefcase, Hash, Search, Mail, CreditCard, FileText, Upload, FileCheck, ClipboardList, Calendar, Lock, Eye, EyeOff } from 'lucide-react';
 import {
   getLocalEmployees,
   saveLocalEmployee,
   updateLocalEmployee,
   deleteLocalEmployee,
   saveLocalEmployeeTask,
+  syncEmployeesWithSupabase,
+  saveEmployeeCredential,
+  getEmployeePassword,
   type Employee
 } from '../lib/localDatabase';
 import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
@@ -43,6 +46,8 @@ const Employees: React.FC<EmployeesProps> = ({ isDemo }) => {
   const [address, setAddress] = useState('');
   const [contactNumber, setContactNumber] = useState('');
   const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [aadharNumber, setAadharNumber] = useState('');
   const [panNumber, setPanNumber] = useState('');
   const [aadharFile, setAadharFile] = useState<File | null>(null);
@@ -69,6 +74,7 @@ const Employees: React.FC<EmployeesProps> = ({ isDemo }) => {
   const [taskPriority, setTaskPriority] = useState<'Low' | 'Medium' | 'High'>('Medium');
   const [taskDueDate, setTaskDueDate] = useState('');
   const [isAssigning, setIsAssigning] = useState(false);
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
 
   const fetchEmployees = async () => {
     setIsLoading(true);
@@ -79,6 +85,7 @@ const Employees: React.FC<EmployeesProps> = ({ isDemo }) => {
           .select('*')
           .order('created_at', { ascending: false });
         if (!error && data) {
+          syncEmployeesWithSupabase(data as Employee[]);
           setEmployees(data as Employee[]);
         } else {
           console.error('Supabase fetch failed, using local:', error);
@@ -101,7 +108,7 @@ const Employees: React.FC<EmployeesProps> = ({ isDemo }) => {
   const resetForm = () => {
     setEditingId(undefined);
     setName(''); setAge(''); setRole(''); setAddress('');
-    setContactNumber(''); setEmail(''); setAadharNumber(''); setPanNumber('');
+    setContactNumber(''); setEmail(''); setPassword(''); setAadharNumber(''); setPanNumber('');
     setAadharFile(null); setPanFile(null);
     setAadharDocUrl(''); setPanDocUrl('');
     setContactError(''); setEmailError(''); setAadharError(''); setPanError('');
@@ -168,24 +175,35 @@ const Employees: React.FC<EmployeesProps> = ({ isDemo }) => {
       setIsUploading(false);
     }
 
-    const empData = {
-      name, age, role, address,
-      contact_number: contactNumber,
-      email: email || undefined,
-      aadhar_number: aadharNumber || undefined,
-      pan_number: panNumber ? panNumber.toUpperCase() : undefined,
-      aadhar_doc_url: finalAadharUrl || undefined,
-      pan_doc_url: finalPanUrl || undefined,
+    const supabasePayload = {
+      name: name.trim(),
+      age: age ? String(age).trim() : null,
+      role: role.trim(),
+      address: address ? address.trim() : null,
+      contact_number: contactNumber.trim(),
+      email: email ? email.trim().toLowerCase() : null,
+      aadhar_number: aadharNumber ? aadharNumber.trim() : null,
+      pan_number: panNumber ? panNumber.trim().toUpperCase() : null,
+      aadhar_doc_url: finalAadharUrl || null,
+      pan_doc_url: finalPanUrl || null
     };
+
+    if (password && password.trim()) {
+      if (editingId) saveEmployeeCredential(editingId, password.trim());
+      if (email) saveEmployeeCredential(email.trim().toLowerCase(), password.trim());
+    }
 
     if (!isDemo && isSupabaseConfigured() && supabase) {
       try {
         if (isEditing && editingId) {
-          const { error } = await supabase.from('employees').update(empData).eq('id', editingId);
+          const { error } = await supabase.from('employees').update(supabasePayload).eq('id', editingId);
           if (error) throw error;
         } else {
-          const { error } = await supabase.from('employees').insert([empData]);
+          const { data, error } = await supabase.from('employees').insert([supabasePayload]).select();
           if (error) throw error;
+          if (data && data[0] && password && password.trim()) {
+            saveEmployeeCredential(data[0].id, password.trim());
+          }
         }
         await fetchEmployees();
       } catch (err: any) {
@@ -193,11 +211,16 @@ const Employees: React.FC<EmployeesProps> = ({ isDemo }) => {
         return;
       }
     } else {
+      const localData = {
+        ...supabasePayload,
+        username: email ? email.split('@')[0] : name.toLowerCase().replace(/\s+/g, ''),
+        password: password || 'password123'
+      };
       if (isEditing && editingId) {
-        const updated = updateLocalEmployee(editingId, empData);
+        const updated = updateLocalEmployee(editingId, localData as any);
         setEmployees(employees.map(e => e.id === editingId ? updated : e));
       } else {
-        const newEmp = saveLocalEmployee(empData);
+        const newEmp = saveLocalEmployee(localData as any);
         setEmployees([newEmp, ...employees]);
       }
     }
@@ -210,8 +233,9 @@ const Employees: React.FC<EmployeesProps> = ({ isDemo }) => {
     setAge(emp.age ?? '');
     setRole(emp.role);
     setAddress(emp.address ?? '');
-    setContactNumber(emp.contact_number);
+    setContactNumber(emp.contact_number || '');
     setEmail(emp.email ?? '');
+    setPassword(getEmployeePassword(emp) || '');
     setAadharNumber(emp.aadhar_number ?? '');
     setPanNumber(emp.pan_number ?? '');
     setAadharDocUrl(emp.aadhar_doc_url ?? '');
@@ -239,7 +263,11 @@ const Employees: React.FC<EmployeesProps> = ({ isDemo }) => {
 
   const filtered = employees.filter(emp => {
     const q = searchTerm.toLowerCase();
-    return !q || emp.name.toLowerCase().includes(q) || emp.role.toLowerCase().includes(q) || emp.contact_number.includes(q);
+    return !q ||
+      emp.name.toLowerCase().includes(q) ||
+      emp.role.toLowerCase().includes(q) ||
+      (emp.contact_number && emp.contact_number.includes(q)) ||
+      (emp.email && emp.email.toLowerCase().includes(q));
   });
 
   const handleAssignTask = async (e: React.FormEvent) => {
@@ -250,51 +278,57 @@ const Employees: React.FC<EmployeesProps> = ({ isDemo }) => {
     try {
       const taskData = {
         employee_id: assigningEmployee.id,
-        title: taskTitle,
-        description: taskDesc,
+        title: taskTitle.trim(),
+        description: taskDesc.trim(),
         priority: taskPriority,
         due_date: taskDueDate,
-        assigned_by: 'Admin', // In a real app, this would be the logged-in user
+        assigned_by: 'Admin',
         status: 'Pending'
       };
 
+      // Automatically save to Supabase or local database
       if (!isDemo && isSupabaseConfigured() && supabase) {
         const { error } = await supabase.from('employee_tasks').insert([taskData]);
-        if (error) throw error;
+        if (error) {
+          console.warn('Supabase task insert warning, saving locally:', error);
+          saveLocalEmployeeTask(taskData as any);
+        }
       } else {
         saveLocalEmployeeTask(taskData as any);
       }
 
-      // Send Email
+      // Automatically dispatch email in background without blocking or showing popup
       if (assigningEmployee.email) {
-        const result = await sendTaskEmail(
+        sendTaskEmail(
           assigningEmployee.email,
           assigningEmployee.name,
-          taskTitle,
-          taskDesc,
+          taskTitle.trim(),
+          taskDesc.trim(),
           taskDueDate,
           taskPriority,
           'Admin'
-        );
-        if (result.success) {
-          alert('Task assigned and email sent successfully!');
-        } else {
-          alert(`Task assigned, but failed to send email. Resend Error: ${result.message}`);
-        }
-      } else {
-        alert('Task assigned! (No email sent because employee has no email address)');
+        ).catch(err => {
+          console.warn('Background task email status:', err);
+        });
       }
 
-      // Close modal
+      const assignedEmpName = assigningEmployee.name;
+
+      // Close modal and reset fields immediately
       setAssigningEmployee(null);
       setTaskTitle('');
       setTaskDesc('');
       setTaskPriority('Medium');
       setTaskDueDate('');
+
+      // Show smooth auto-dismissing toast notification
+      setToastMsg(`Task assigned to ${assignedEmpName} successfully!`);
+      setTimeout(() => setToastMsg(null), 3000);
     } catch (error: any) {
-      alert(`Error assigning task: ${error.message}`);
+      console.error('Error assigning task:', error);
+    } finally {
+      setIsAssigning(false);
     }
-    setIsAssigning(false);
   };
 
   return (
@@ -497,6 +531,45 @@ const Employees: React.FC<EmployeesProps> = ({ isDemo }) => {
                   onChange={e => { setEmail(e.target.value); setEmailError(''); }}
                 />
                 {emailError && <span style={{ fontSize: '12px', color: 'hsl(var(--danger))', marginTop: '5px', display: 'flex', alignItems: 'center', gap: '4px' }}>⚠ {emailError}</span>}
+              </div>
+
+              {/* Portal Password */}
+              <div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: 600, color: 'hsl(var(--muted))', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  <Lock size={12} /> Portal Password (Optional)
+                </label>
+                <div style={{ position: 'relative' }}>
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    className="form-input"
+                    style={{ width: '100%', paddingRight: '40px' }}
+                    placeholder="Set employee login password (default: password123)"
+                    value={password}
+                    onChange={e => setPassword(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    style={{
+                      position: 'absolute',
+                      right: '12px',
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      background: 'none',
+                      border: 'none',
+                      color: showPassword ? 'hsl(var(--primary))' : 'hsl(var(--muted))',
+                      cursor: 'pointer',
+                      padding: '4px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      transition: 'color 0.2s ease'
+                    }}
+                    title={showPassword ? "Hide password" : "Show password"}
+                  >
+                    {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
               </div>
 
               {/* Aadhar Number */}
@@ -822,11 +895,35 @@ const Employees: React.FC<EmployeesProps> = ({ isDemo }) => {
 
               <div style={{ display: 'flex', gap: '12px', marginTop: '16px' }}>
                 <button type="submit" className="btn btn-primary" style={{ flex: 1 }} disabled={isAssigning}>
-                  {isAssigning ? 'Assigning...' : 'Assign & Notify'}
+                  {isAssigning ? 'Saving...' : 'Assign Task'}
                 </button>
               </div>
             </form>
           </div>
+        </div>
+      )}
+
+      {/* Floating Auto-Dismiss Toast */}
+      {toastMsg && (
+        <div style={{
+          position: 'fixed',
+          bottom: '24px',
+          right: '24px',
+          backgroundColor: '#10b981',
+          color: '#ffffff',
+          padding: '12px 20px',
+          borderRadius: '8px',
+          fontSize: '13.5px',
+          fontWeight: 600,
+          boxShadow: '0 8px 24px rgba(0, 0, 0, 0.25)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px',
+          zIndex: 9999,
+          animation: 'fade-in 0.25s ease-out'
+        }}>
+          <Check size={18} />
+          {toastMsg}
         </div>
       )}
 
